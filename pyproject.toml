@@ -4,4 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "dh-segment",
+    "pillow>=12.1.1",
+    "pymupdf>=1.27.1",
+    "tensorflow>=2.20.0",
+    "torch>=2.10.0",
+    "transformers>=5.2.0",
+]
+
+[tool.uv.sources]
+dh-segment = { git = "https://github.com/dhlab-epfl/dhSegment.git" }
