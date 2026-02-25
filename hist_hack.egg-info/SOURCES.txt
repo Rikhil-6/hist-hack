@@ -1,0 +1,7 @@
+README.md
+main.py
+pyproject.toml
+hist_hack.egg-info/PKG-INFO
+hist_hack.egg-info/SOURCES.txt
+hist_hack.egg-info/dependency_links.txt
+hist_hack.egg-info/top_level.txt
