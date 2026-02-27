@@ -6,9 +6,15 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dh-segment",
+    "easyocr",
+    "matplotlib>=3.10.8",
+    "paddleocr==3.3.0",
+    "paddlepaddle==3.2.0",
+    "pdf2image>=1.17.0",
     "pillow>=12.1.1",
     "pymupdf>=1.27.1",
     "pytesseract>=0.3.13",
+    "python-doctr[torch]>=1.0.1",
     "tensorflow>=2.20.0",
     "torch>=2.10.0",
     "transformers>=5.2.0",
@@ -16,3 +22,4 @@ dependencies = [
 
 [tool.uv.sources]
 dh-segment = { git = "https://github.com/dhlab-epfl/dhSegment.git" }
+easyocr = { git = "https://github.com/JaidedAI/EasyOCR.git" }
