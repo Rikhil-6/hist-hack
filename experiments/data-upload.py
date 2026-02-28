@@ -29,12 +29,12 @@ OCR_PROMPT = """Transcribe all visible text from this historical colonial docume
 Rules:
 - Preserve original spelling, capitalisation, and punctuation exactly
 - Maintain paragraph and line structure as it appears on the page
-- Do NOT correct, modernise, or interpret any text
-- Do NOT guess at illegible words — mark them [ILLEGIBLE] instead
-- Margin notes → prefix with [MARGIN: ...]
-- Headers, stamps, page numbers → prefix with [HEADER: ...]
-- Blank page or image only → output [BLANK PAGE]
-- Output the raw transcription ONLY — no preamble, no commentary"""
+- Maintain coherence for word and sentence structure contextually in ENGLISH
+- Do NOT guess at illegible words - mark them [ILLEGIBLE] instead
+- Margin notes - prefix with [MARGIN: ...]
+- Headers, stamps, page numbers - prefix with [HEADER: ...]
+- Blank page or image only - output [BLANK PAGE]
+- Output the raw transcription ONLY - no preamble, no commentary"""
 
 
 # ── Retry: only on transient API errors ───────────────────────────────────────
