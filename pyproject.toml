@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "dh-segment",
     "easyocr",
+    "google-genai>=1.65.0",
     "matplotlib>=3.10.8",
     "paddleocr==3.3.0",
     "paddlepaddle==3.2.0",
