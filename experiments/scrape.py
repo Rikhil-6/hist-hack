@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright
 PAGE_URL   = "https://lib-nus-edu-sg.libproxy1.nus.edu.sg/nus/copapers/CO273/CO273.html"
 OUTPUT_DIR = "./pdfs"
 DELAY      = 1.0
-LIMIT      = 50   # set to e.g. 5 to download only the first 5 PDFs, None for all
+LIMIT      = 200   # set to e.g. 5 to download only the first 5 PDFs, None for all
 # ─────────────────────────────────────────────────────────────────────────────
 
 
