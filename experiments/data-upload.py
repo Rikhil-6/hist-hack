@@ -7,20 +7,22 @@ from google.cloud import storage
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # --- CONFIGURATION ---
-PROJECT_ID = "your-project-id"
-BUCKET_NAME = "your-bucket-name"
+PROJECT_ID = "your-project-id" # from google GENAI
+BUCKET_NAME = "your-bucket-name" # bucket with stored data
 INPUT_FOLDER = "pdfs/"      # Folder inside bucket
 OUTPUT_FOLDER = "ocr_results/"  # Folder for .txt files
 MODEL_ID = "gemini-2.0-flash"   # Fast, cheap, high-rate limits
-CONCURRENCY = 10                # Number of pages to process at once
+CONCURRENCY = 20                # Number of pages to process at once -> if more better ah
 
 # Clients
-genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY")) # configure in hist-hack (same place as uv.lock)
 storage_client = storage.Client(project=PROJECT_ID)
 bucket = storage_client.bucket(BUCKET_NAME)
 
 OCR_PROMPT = """Transcribe this page as best as can be done while maintaining coherence. 
 Output raw text ONLY."""
+
+# everything below shld be fixed
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=60))
 async def process_page(img_bytes, doc_name, page_num, semaphore):
