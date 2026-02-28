@@ -1,12 +1,27 @@
 services:
   backend:
-    build: ./app-backend
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    volumes:
+      # Mount the WHOLE root so uv sees pyproject.toml
+      - .:/app 
+      - .venv:/app/.venv
+    # Working directory is the root where pyproject.toml lives
+    working_dir: /app
     ports:
       - "8000:8000"
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - UV_PROJECT_ENVIRONMENT=/app/.venv
+      # Load the .env from the root automatically
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    command: >
+      sh -c "uv sync --frozen --no-install-python && 
+             uv run uvicorn app-backend.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
-    build: ./app
+    image: node:20-alpine
+    volumes:
+      - ./app:/app
+    working_dir: /app
     ports:
       - "3000:3000"
-    command: npm run dev
+    command: sh -c "npm install && npm run dev -- --host --port 3000"
