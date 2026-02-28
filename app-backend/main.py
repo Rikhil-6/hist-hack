@@ -1,4 +1,7 @@
 import json, os, shutil, tempfile, uuid
+import sys
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
@@ -9,7 +12,8 @@ from fastapi.responses import StreamingResponse
 from ocr import run_ocr_pipeline
 
 app = FastAPI(title="Kratoska OCR API")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:3000" # FOR DEV TEST
+    ], allow_methods=["*"], allow_headers=["*"])
 
 JOBS: dict[str, dict] = {}
 JOBS_DIR = Path(tempfile.gettempdir()) / "kratoska_jobs"
