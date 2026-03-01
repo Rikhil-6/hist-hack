@@ -1,19 +1,12 @@
 // ChatView.jsx — Semantic Historian RAG chat
 import { useEffect, useRef } from "react";
 
-const FLAGS = { CHAT_BACKEND: false, SUMMARIZE_ENABLED: false };
-
-const MOCK_RESPONSES = [
-  "Based on the CO 273 documents, the 1915 Singapore Mutiny was precipitated by a combination of religious agitation among the 5th Light Infantry and wartime anxieties about deployment to fight other Muslims.",
-  "The corpus reveals three recurring justifications: fear of German prisoner collusion, loyalty disputes among Indian sepoys, and administrative failures in leave management.",
-  "Thematic analysis of the keyword cluster 'Labour / Migration / Health' across 47 documents suggests a systemic colonial pattern of cost-externalisation onto migrant communities.",
-];
-
-let mockIdx = 0;
+// Set to true to use the new FastAPI RAG router
+const FLAGS = { CHAT_BACKEND: true, SUMMARIZE_ENABLED: false };
 
 export default function ChatView({ chatMessages, setChatMessages, chatTyping, setChatTyping }) {
   const inputRef = useRef();
-  const endRef   = useRef();
+  const endRef = useRef();
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages, chatTyping]);
 
@@ -25,18 +18,37 @@ export default function ChatView({ chatMessages, setChatMessages, chatTyping, se
     setChatMessages((m) => [...m, { role: "user", content }]);
     setChatTyping(true);
 
-    await new Promise((r) => setTimeout(r, 1500 + Math.random() * 800));
+    try {
+      if (FLAGS.CHAT_BACKEND) {
+        // Hit the live FastAPI RAG endpoint
+        const response = await fetch("http://localhost:8000/api/rag/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: content }),
+        });
 
-    let reply;
-    if (FLAGS.CHAT_BACKEND) {
-      // TODO: POST /api/chat
-      reply = "Backend response here.";
-    } else {
-      reply = MOCK_RESPONSES[mockIdx++ % MOCK_RESPONSES.length];
+        if (!response.ok) throw new Error("Backend connection failed");
+
+        const data = await response.json();
+
+        setChatMessages((m) => [
+          ...m,
+          { 
+            role: "assistant", 
+            content: data.reply,
+            citations: data.citations // Store the page-wise evidence
+          }
+        ]);
+      } else {
+        // Mock fallback logic
+        await new Promise((r) => setTimeout(r, 1000));
+        setChatMessages((m) => [...m, { role: "assistant", content: "Switch RAG_BACKEND on to query the live archive." }]);
+      }
+    } catch (err) {
+      setChatMessages((m) => [...m, { role: "assistant", content: `System Error: ${err.message}` }]);
+    } finally {
+      setChatTyping(false);
     }
-
-    setChatTyping(false);
-    setChatMessages((m) => [...m, { role: "assistant", content: reply }]);
   };
 
   const handleKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
@@ -45,20 +57,43 @@ export default function ChatView({ chatMessages, setChatMessages, chatTyping, se
     <div className="fade-up" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexShrink: 0 }}>
         <h2 style={{ fontFamily: "'Playfair Display',serif", fontSize: "1.4rem" }}>The Semantic Historian</h2>
-        <span className="status-tag status-mock"><span className="status-dot" />MOCK DATA</span>
-        <span className={`flag-pill ${FLAGS.CHAT_BACKEND ? "flag-on" : "flag-off"}`}>{FLAGS.CHAT_BACKEND ? "✓" : "⚠"} RAG_BACKEND</span>
+        <span className={`status-tag ${FLAGS.CHAT_BACKEND ? "status-live" : "status-mock"}`}>
+          <span className="status-dot" />{FLAGS.CHAT_BACKEND ? "LIVE DATA" : "MOCK DATA"}
+        </span>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 20, flex: 1, minHeight: 0 }}>
         <div className="card" style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
           <div className="card-title">Corpus Interrogation</div>
-          <div className="card-subtitle">RAG over CO 273 + Kratoska Index</div>
+          <div className="card-subtitle">RAG over CO 273 OCR Results</div>
 
           <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, paddingBottom: 16 }}>
             {chatMessages.map((m, i) => (
               <div key={i} className={`chat-bubble ${m.role} fade-up`}>
                 <div className="chat-role">{m.role === "assistant" ? "Historian" : "Researcher"}</div>
-                {m.content}
+                
+                <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+
+                {/* Evidence Tray: Render citations if they exist */}
+                {m.citations && m.citations.length > 0 && (
+                  <div style={{ marginTop: 12, paddingTop: 8, borderTop: "1px solid var(--rule)" }}>
+                    <div style={{ fontSize: "0.65rem", textTransform: "uppercase", color: "var(--faded)", marginBottom: 4 }}>Archival Evidence:</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {m.citations.map((cite, idx) => (
+                        <a 
+                          key={idx} 
+                          href={cite.url} 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="status-tag" 
+                          style={{ fontSize: "0.6rem", textDecoration: "none", cursor: "pointer", background: "rgba(255,255,255,0.05)" }}
+                        >
+                          📄 {cite.doc} (Pg {cite.page})
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
             {chatTyping && (
@@ -76,33 +111,13 @@ export default function ChatView({ chatMessages, setChatMessages, chatTyping, se
           </div>
         </div>
 
-        <div>
+        {/* Sidebar remains untouched for Thematic Analysis and Modes */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <div className="card">
             <div className="card-title">Summarization</div>
-            <div className="card-subtitle">Historian-grade document summaries</div>
             <span className={`flag-pill ${FLAGS.SUMMARIZE_ENABLED ? "flag-on" : "flag-off"}`}>{FLAGS.SUMMARIZE_ENABLED ? "✓" : "⚠"} SUMMARIZE</span>
-            <p style={{ fontSize: "0.75rem", color: "var(--faded)", marginTop: 12, fontStyle: "italic" }}>Enable SUMMARIZE flag to auto-generate summaries on ingestion.</p>
             <hr className="divider" />
             <button className="btn btn-ghost" style={{ width: "100%" }} disabled={!FLAGS.SUMMARIZE_ENABLED}>Summarize Active Doc</button>
-          </div>
-
-          <div className="card" style={{ marginTop: 0 }}>
-            <div className="card-title">Thematic Analysis</div>
-            <div className="card-subtitle">Keyword connections</div>
-            {["Colonial Administration", "Trade & Revenue", "Labour & Migration", "Public Order", "Health & Medicine"].map((t) => (
-              <div key={t} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--rule)", fontSize: "0.76rem" }}>
-                <span>{t}</span>
-                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "0.64rem", color: "var(--amber)" }}>{Math.floor(Math.random() * 40 + 8)} docs</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="card" style={{ marginTop: 0 }}>
-            <div className="card-title">Theme Mode</div>
-            <div className="card-subtitle">Specialise on a theme</div>
-            {["Public Health", "1915 Mutiny", "Opium Trade", "Labour", "Governance"].map((t) => (
-              <button key={t} className="btn btn-ghost" style={{ display: "block", width: "100%", marginBottom: 6, textAlign: "left" }}>{t}</button>
-            ))}
           </div>
         </div>
       </div>
