@@ -1,76 +1,72 @@
-import io
-import pandas as pd
-from fastapi import APIRouter, Query, HTTPException
+import numpy as np
+from fastapi import APIRouter, Query, HTTPException, Request
+from sentence_transformers import SentenceTransformer
 from google.cloud import storage
 
 router = APIRouter()
-
 BUCKET_NAME = "hist-hack-bucket2"
-INDEX_PATH = "indexes/vector_index.parquet"
+
+# Load the ML model once into memory for the query encoding
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 @router.get("/search")
-def search(q: str = Query(..., min_length=1), mode: str = "fuzzy"):
+def search(request: Request, q: str = Query(..., min_length=1), mode: str = "thematic"):
+    catalog_df = getattr(request.app.state, "catalog_df", None)
+    embeddings = getattr(request.app.state, "embeddings", None)
+
+    if catalog_df is None:
+        raise HTTPException(status_code=503, detail="The card catalog is still being indexed.")
+
     try:
-        client = storage.Client()
-        bucket = client.bucket(BUCKET_NAME)
-        
-        # 1. Load the Index from GCS
-        index_blob = bucket.blob(INDEX_PATH)
-        buffer = io.BytesIO()
-        index_blob.download_to_file(buffer)
-        buffer.seek(0)
-        df = pd.read_parquet(buffer)
-        
-        query = q.lower().strip()
+        bucket = storage.Client().bucket(BUCKET_NAME)
+        query = q.strip()
 
-        # 2. Search Logic (Comma-separated keywords)
+        # 1. Exact Word Search (Citable Terminology)
         if mode == "exact":
-            mask = df['keywords'].fillna('').apply(
-                lambda x: query in [k.strip().lower() for k in str(x).split(',')]
-            )
+            # Strict regex boundary check to avoid partial matches
+            mask = catalog_df['keywords'].fillna('').str.lower().str.contains(f"\\b{query.lower()}\\b", regex=True)
+            results_df = catalog_df[mask].head(10).copy()
+            results_df['score'] = 1.0
+        
+        # 2. Neural Thematic Search (ML-based)
         else:
-            mask = df['keywords'].fillna('').str.lower().str.contains(query, na=False)
-
-        results_df = df[mask].head(10) # Limit for mobile testing performance
+            if embeddings is None:
+                raise HTTPException(status_code=500, detail="Neural vectors unavailable. Check server logs.")
+            
+            # Encode user query into the same vector space
+            query_vec = model.encode([query])
+            
+            # Fast Cosine Similarity via Matrix Multiplication (Dot Product)
+            # This is the high-speed math you've been using with NumPy
+            scores = np.dot(embeddings, query_vec.T).flatten()
+            
+            # Get top 15 matches by sorting the scores
+            top_idx = np.argsort(scores)[::-1][:15]
+            results_df = catalog_df.iloc[top_idx].copy()
+            results_df['score'] = scores[top_idx]
 
         formatted = []
         for _, row in results_df.iterrows():
-            # Extract variables from row
-            doc_name = str(row.get('document_dir', ''))
-            page_id = str(row.get('page_id', ''))
+            doc_name, page_id = str(row.get('document_dir', '')), str(row.get('page_id', ''))
+            ocr_path = f"ocr_results/{doc_name}/{page_id}.txt"
             
-            # 3. Construct the nested path: ocr_results/doc_name/page_id.txt
-            # Based on your update: the text file is inside a folder of the same name
-            ocr_text_path = f"ocr_results/{doc_name}/{page_id}.txt"
-            
-            # 4. Fetch the actual text content
-            ocr_content = "Text content not found."
+            content = "Folio text pending retrieval..."
             try:
-                text_blob = bucket.blob(ocr_text_path)
-                if text_blob.exists():
-                    ocr_content = text_blob.download_as_text()
-                else:
-                    # Fallback check: sometimes page_id doesn't include the doc prefix
-                    # e.g. ocr_results/DocA/DocA_001.txt vs ocr_results/DocA/001.txt
-                    ocr_content = f"File not found at: {ocr_text_path}"
-            except Exception as e:
-                ocr_content = f"Error retrieving content: {str(e)}"
+                blob = bucket.blob(ocr_path)
+                if blob.exists(): 
+                    content = blob.download_as_text()
+            except: 
+                pass
 
             formatted.append({
-                "keyword": q,
-                "page": page_id,
-                "co273File": doc_name,
-                "description": ocr_content, # The actual text content from the nested file
-                "confidence": 0.95,
-                "relatedKeywords": str(row.get('keywords', '')).split(','),
-                "gcsPath": ocr_text_path
+                "folio_id": page_id,
+                "collection_ref": doc_name,
+                "extract": content,
+                "match_strength": float(row['score']), # Neural similarity score
+                "cross_references": str(row.get('keywords', '')).split(',')
             })
 
-        return {
-            "status": "success", 
-            "count": len(formatted),
-            "results": formatted
-        }
+        return {"status": "success", "results": formatted}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Neural Search Error: {str(e)}")
