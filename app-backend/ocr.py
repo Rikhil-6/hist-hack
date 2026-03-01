@@ -184,13 +184,6 @@ async def _process_chunk(
             raw_text    = await _call_gemini(file_obj, page_nums[0], page_nums[-1])
             return _parse_pages(raw_text, page_nums)
         except Exception as e:
-            # If chunk is too large, retry page by page
-            if "INVALID_ARGUMENT" in str(e) and len(page_nums) > 1:
-                results = {}
-                for pn in page_nums:
-                    sub = await _process_chunk(pdf_path, [pn], sem)
-                    results.update(sub)
-                return results
             return {pn: f"[OCR ERROR page {pn}: {e}]" for pn in page_nums}
         finally:
             if file_obj:

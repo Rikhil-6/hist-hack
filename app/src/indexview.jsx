@@ -1,27 +1,43 @@
-// IndexView.jsx — Kratoska keyword index search
 import { useState } from "react";
 
-const FLAGS = { INDEX_SEARCH_BACKEND: false };
+// Set this to true to use the GCS backend
+const FLAGS = { INDEX_SEARCH_BACKEND: true };
 
-const MOCK_SEARCH_RESULTS = [
-  { keyword: "Opium", page: 142, co273File: "CO273_0142.tif", description: "References to opium trade regulations in the Straits Settlements, 1910–1920.", confidence: 0.94, relatedKeywords: ["Narcotics", "Trade", "Revenue"] },
-  { keyword: "Opium", page: 207, co273File: "CO273_0207.tif", description: "Opium farm licensing disputes and colonial revenue reports.", confidence: 0.88, relatedKeywords: ["Revenue", "Licensing", "Colonial Policy"] },
-  { keyword: "Opium", page: 318, co273File: "CO273_0318.tif", description: "Medical and social commentary on opium use among migrant labourers.", confidence: 0.76, relatedKeywords: ["Labour", "Health", "Migration"] },
-];
-
-export default function IndexView({ indexQuery, setIndexQuery, indexResults, setIndexResults, indexSearched, setIndexSearched, indexSelected, setIndexSelected }) {
+export default function IndexView({ 
+  indexQuery, setIndexQuery, 
+  indexResults, setIndexResults, 
+  indexSearched, setIndexSearched, 
+  indexSelected, setIndexSelected 
+}) {
   const [searching, setSearching] = useState(false);
 
   const handleSearch = async () => {
     if (!indexQuery.trim()) return;
     setSearching(true);
     setIndexSelected(null);
-    await new Promise((r) => setTimeout(r, 1100));
+
     if (FLAGS.INDEX_SEARCH_BACKEND) {
-      // TODO: GET /api/index/search?q=indexQuery
+      try {
+        const response = await fetch(`/api/index/search?q=${encodeURIComponent(indexQuery)}&mode=fuzzy`);
+        const data = await response.json();
+        
+        if (data.status === "success") {
+          setIndexResults(data.results);
+        } else {
+          setIndexResults([]);
+        }
+      } catch (err) {
+        console.error("Connection error:", err);
+        setIndexResults([]);
+      }
     } else {
-      setIndexResults(MOCK_SEARCH_RESULTS);
+      // Mock Fallback for local testing
+      await new Promise((r) => setTimeout(r, 600));
+      setIndexResults([
+        { keyword: "Opium", page: 142, co273File: "CO273_0142.tif", description: "Mock result...", confidence: 0.94, relatedKeywords: ["Trade"] }
+      ]);
     }
+    
     setSearching(false);
     setIndexSearched(true);
   };
@@ -30,86 +46,57 @@ export default function IndexView({ indexQuery, setIndexQuery, indexResults, set
     <div className="fade-up">
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
         <h2 style={{ fontFamily: "'Playfair Display',serif", fontSize: "1.4rem" }}>Kratoska Index — Search</h2>
-        <span className={`status-tag status-mock`}><span className="status-dot" />MOCK DATA</span>
-        <span className={`flag-pill ${FLAGS.INDEX_SEARCH_BACKEND ? "flag-on" : "flag-off"}`}>
-          {FLAGS.INDEX_SEARCH_BACKEND ? "✓" : "⚠"} SEARCH_BACKEND
+        <span className={`status-tag ${FLAGS.INDEX_SEARCH_BACKEND ? 'status-live' : 'status-mock'}`}>
+          <span className="status-dot" />
+          {FLAGS.INDEX_SEARCH_BACKEND ? "GCS LIVE" : "MOCK"}
         </span>
       </div>
 
-      <div className="search-bar">
+      <div className="search-bar" style={{ display: "flex", gap: 8 }}>
         <input
           className="search-input"
-          placeholder="Search keyword (e.g. 'Opium', '1915 Mutiny', 'Revenue')"
+          placeholder="Search keywords (e.g. 'Revenue')..."
           value={indexQuery}
           onChange={(e) => setIndexQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+          style={{ flex: 1, padding: '10px', borderRadius: '4px', border: '1px solid #ccc' }}
         />
         <button className="btn btn-primary" onClick={handleSearch} disabled={searching}>
-          {searching ? <span className="spinner" /> : "Search Index"}
+          {searching ? "..." : "Search"}
         </button>
       </div>
 
-      <div className="two-col">
-        <div>
-          {indexSearched && !searching && (
-            <div style={{ fontSize: "0.72rem", color: "var(--faded)", marginBottom: 12, fontFamily: "'JetBrains Mono',monospace" }}>
-              {indexResults.length} result{indexResults.length !== 1 ? "s" : ""} for "{indexQuery}"
-            </div>
-          )}
-          {searching && (
-            <div style={{ textAlign: "center", padding: "30px 0" }}>
-              <div className="spinner" style={{ width: 28, height: 28, margin: "0 auto 12px" }} />
-              <div style={{ fontSize: "0.78rem", color: "var(--faded)" }}>Querying Kratoska Index…</div>
-            </div>
-          )}
-          {!searching && indexResults.map((r, i) => (
-            <div key={i} className={`result-item ${indexSelected === i ? "selected" : ""}`} onClick={() => setIndexSelected(i)}>
-              <div className="result-header">
-                <span className="result-keyword">{r.keyword}</span>
-                <span className="result-page">p. {r.page}</span>
-              </div>
-              <div className="result-desc">{r.description}</div>
-              <div className="result-file">↗ {r.co273File}</div>
-              <div className="tag-list">{r.relatedKeywords.map((t) => <span className="tag" key={t}>{t}</span>)}</div>
-              <div className="confidence-bar"><div className="confidence-fill" style={{ width: `${r.confidence * 100}%` }} /></div>
+      <div className="two-col" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginTop: 20 }}>
+        {/* Results List */}
+        <div className="results-column">
+          {indexResults.map((r, i) => (
+            <div 
+              key={i} 
+              className={`result-item ${indexSelected === i ? "selected" : ""}`} 
+              onClick={() => setIndexSelected(i)}
+              style={{ padding: '12px', borderBottom: '1px solid #eee', cursor: 'pointer', background: indexSelected === i ? '#f0f7ff' : 'transparent' }}
+            >
+              <div style={{ fontWeight: 'bold' }}>{r.keyword} <span style={{ float: 'right', color: '#666' }}>p. {r.page}</span></div>
+              <div style={{ fontSize: '0.85rem', color: '#444' }}>{r.description}</div>
             </div>
           ))}
-          {indexSearched && !searching && indexResults.length === 0 && (
-            <div style={{ textAlign: "center", padding: "40px 0", color: "var(--faded)" }}>No results found.</div>
-          )}
         </div>
 
-        <div>
-          <div className="card">
-            <div className="card-title">Document Preview</div>
-            <div className="card-subtitle">CO 273 Source Image</div>
-            {indexSelected === null ? (
-              <div className="image-panel">
-                <div className="image-placeholder">📋</div>
-                <div className="image-label">Select a result to preview</div>
+        {/* Preview Pane */}
+        <div className="preview-column">
+          <div className="card" style={{ border: '1px solid #ddd', padding: '15px', borderRadius: '8px' }}>
+            <div className="card-title" style={{ fontWeight: 'bold', marginBottom: 10 }}>Document Preview</div>
+            {indexSelected !== null ? (
+              <div>
+                <div style={{ fontSize: '0.9rem' }}><strong>File:</strong> {indexResults[indexSelected].co273File}</div>
+                <div style={{ height: '200px', background: '#eee', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '10px 0' }}>
+                   {/* This is where the GCS image would load */}
+                   <span style={{ fontSize: '3rem' }}>📄</span>
+                </div>
+                <button className="btn btn-primary" style={{ width: '100%' }}>Open Full Viewer</button>
               </div>
             ) : (
-              <>
-                <div className="meta-row">
-                  <div className="meta-item"><span className="meta-label">File:</span> {indexResults[indexSelected].co273File}</div>
-                  <div className="meta-item"><span className="meta-label">Page:</span> {indexResults[indexSelected].page}</div>
-                </div>
-                <div className="image-panel">
-                  <div className="image-placeholder" style={{ fontSize: "4rem" }}>🗂</div>
-                  <div className="image-label">{indexResults[indexSelected].co273File}</div>
-                  <div style={{ fontSize: "0.68rem", color: "#4a3f2a" }}>[Image loads from Cloud Storage in production]</div>
-                </div>
-                <div style={{ marginTop: 14 }}>
-                  <div style={{ fontFamily: "'Playfair Display',serif", fontSize: "0.9rem", marginBottom: 6 }}>{indexResults[indexSelected].description}</div>
-                  <div className="tag-list">{indexResults[indexSelected].relatedKeywords.map((t) => <span className="tag" key={t}>{t}</span>)}</div>
-                </div>
-                <hr className="divider" />
-                <div style={{ display: "flex", gap: 10 }}>
-                  <button className="btn btn-primary">Open in Viewer</button>
-                  <button className="btn btn-ghost">Add Keywords</button>
-                  <button className="btn btn-ghost">Export</button>
-                </div>
-              </>
+              <div style={{ color: '#999', textAlign: 'center' }}>Select a result to view</div>
             )}
           </div>
         </div>

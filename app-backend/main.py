@@ -10,6 +10,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ocr import run_ocr_pipeline
+from routers import index 
 
 app = FastAPI(title="Kratoska OCR API")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://localhost:3000" # FOR DEV TEST
@@ -19,6 +20,7 @@ JOBS: dict[str, dict] = {}
 JOBS_DIR = Path(tempfile.gettempdir()) / "kratoska_jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
+app.include_router(index.router, prefix="/api/index")
 
 @app.get("/")
 def health():
