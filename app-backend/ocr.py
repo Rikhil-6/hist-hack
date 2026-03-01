@@ -7,8 +7,8 @@ from google.genai import types
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 DPI         = 200
-CONCURRENCY = 5
-MODEL       = "gemini-2.0-flash"
+CONCURRENCY = 10
+MODEL       = "gemini-2.5-flash"
 
 OCR_PROMPT = """Transcribe ALL text from this historical colonial document page as it appears.
 Preserve original spelling, capitalisation, punctuation, and paragraph breaks.
