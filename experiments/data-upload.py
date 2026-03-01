@@ -1,133 +1,289 @@
-import asyncio, os
+import asyncio
+import concurrent.futures
+import os
+import argparse
+import time
+import re
 from pathlib import Path
+
 import fitz
 from google import genai
 from google.genai import types
 from google.cloud import storage
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential, retry_if_exception
+from dotenv import load_dotenv
 
-# ── Config ────────────────────────────────────────────────────────────────────
-PROJECT_ID    = "your-project-id"
-BUCKET_NAME   = "your-bucket-name"
-INPUT_FOLDER  = "pdfs/"
-OUTPUT_FOLDER = "ocr_results/"
-MODEL_ID      = "gemini-2.0-flash"
-DPI           = 200    # 200 = fast + readable; bump to 300 for dense handwriting
-CONCURRENCY   = 20     # paid tier; lower to 10 if you see 429s
+load_dotenv()
 
-# ── Clients ───────────────────────────────────────────────────────────────────
+# ── Thread pool ──────────────────────────────────────────────────────────
+asyncio.get_event_loop().set_default_executor(
+    concurrent.futures.ThreadPoolExecutor(max_workers=100)
+)
+
+# ── Config ───────────────────────────────────────────────────────────────
+PROJECT_ID      = "project-3f441d35-164a-4a8d-b3a"
+BUCKET_NAME     = "hist-hack-bucket2"
+OUTPUT_FOLDER   = "ocr_results"
+LOCAL_INPUT_DIR = "./experiments/pdfs"
+MODEL_ID        = "gemini-2.5-flash"
+
+CHUNK_SIZE      = 50   # pages per Gemini call
+DOC_CONCURRENCY = 5    # parallel documents
+CHUNK_CONCURRENCY = 10 # parallel chunks across all docs
+
+# ── Clients ──────────────────────────────────────────────────────────────
 genai_client   = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 storage_client = storage.Client(project=PROJECT_ID)
 bucket         = storage_client.bucket(BUCKET_NAME)
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
-# Short but precise — anchors fidelity without over-constraining speed.
-# Explicit annotation prefixes prevent the model improvising output format.
-# Prohibiting inference/guessing reduces hallucination on hard passages.
-OCR_PROMPT = """Transcribe all visible text from this historical colonial document page.
+OCR_PROMPT = """Transcribe all visible text from this historical colonial document.
 
 Rules:
 - Preserve original spelling, capitalisation, and punctuation exactly
 - Maintain paragraph and line structure as it appears on the page
-- Maintain coherence for word and sentence structure contextually in ENGLISH
-- Do NOT guess at illegible words - mark them [ILLEGIBLE] instead
-- Margin notes - prefix with [MARGIN: ...]
-- Headers, stamps, page numbers - prefix with [HEADER: ...]
-- Blank page or image only - output [BLANK PAGE]
-- Output the raw transcription ONLY - no preamble, no commentary"""
+- Do NOT guess at illegible words — mark them [ILLEGIBLE]
+- Margin notes → prefix with [MARGIN: ...]
+- Headers/stamps/page numbers → prefix with [HEADER: ...]
+- Blank page → output [BLANK PAGE]
+- Separate each page's transcription with: --- PAGE N ---
+  where N is the absolute page number passed to you
+- Output transcription ONLY
+"""
 
-
-# ── Retry: only on transient API errors ───────────────────────────────────────
-def _is_retryable(exc) -> bool:
+# ── Retryable error detection ────────────────────────────────────────────
+def _is_retryable(exc: Exception) -> bool:
     msg = str(exc)
-    return "429" in msg or "503" in msg or "500" in msg
+    return any(code in msg for code in ("429", "503", "500", "RESOURCE_EXHAUSTED"))
 
+# ── Render a chunk of pages to a temp PDF ───────────────────────────────
+async def render_chunk_to_pdf(pdf_path: Path, page_nums: list[int]) -> bytes:
+    """Extract given 1-indexed page_nums into an in-memory PDF."""
+    def _render():
+        src = fitz.open(str(pdf_path))
+        out = fitz.open()
+        for pn in page_nums:
+            out.insert_pdf(src, from_page=pn - 1, to_page=pn - 1)
+        data = out.tobytes()
+        src.close()
+        out.close()
+        return data
 
-@retry(
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=4, max=60),
-    retry=_is_retryable,
-    reraise=True,
-)
-async def _call_gemini(img_bytes: bytes) -> str:
-    """Call Gemini with retry on quota/server errors only."""
-    response = await asyncio.to_thread(
-        genai_client.models.generate_content,
-        model=MODEL_ID,
-        contents=[
-            types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-            types.Part.from_text(text=OCR_PROMPT),
-        ],
-    )
-    return response.text.strip()
+    return await asyncio.to_thread(_render)
 
+# ── Upload chunk PDF to Gemini Files API ────────────────────────────────
+async def upload_chunk(chunk_bytes: bytes, label: str) -> types.File:
+    import tempfile
 
-# ── Page processor ────────────────────────────────────────────────────────────
-async def process_page(
-    img_bytes: bytes,
+    def _upload():
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(chunk_bytes)
+            tmp_path = f.name
+        file_obj = genai_client.files.upload(
+            file=tmp_path,
+            config={"mime_type": "application/pdf"},
+        )
+        os.unlink(tmp_path)
+        return file_obj
+
+    file_obj = await asyncio.to_thread(_upload)
+
+    # Poll until ACTIVE
+    while True:
+        status = await asyncio.to_thread(genai_client.files.get, name=file_obj.name)
+        if status.state == types.FileState.ACTIVE:
+            break
+        if status.state == types.FileState.FAILED:
+            raise RuntimeError(f"Gemini file upload failed for chunk {label}")
+        await asyncio.sleep(1)
+
+    return file_obj
+
+# ── Delete Gemini file ───────────────────────────────────────────────────
+async def delete_gemini_file(file_obj: types.File):
+    try:
+        await asyncio.to_thread(genai_client.files.delete, name=file_obj.name)
+    except Exception as e:
+        print(f"  [WARN] Could not delete Gemini file {file_obj.name}: {e}")
+
+# ── Gemini OCR call with retry ───────────────────────────────────────────
+async def call_gemini_with_retry(file_obj: types.File, start_page: int, end_page: int) -> str:
+    prompt = OCR_PROMPT + f"\nThis chunk contains pages {start_page} to {end_page}. Number pages accordingly."
+
+    async for attempt in AsyncRetrying(
+        stop=stop_after_attempt(30),
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+    ):
+        with attempt:
+            response = await asyncio.to_thread(
+                genai_client.models.generate_content,
+                model=MODEL_ID,
+                contents=[file_obj, prompt],
+            )
+            if not response.text:
+                raise RuntimeError("Empty Gemini response")
+            return response.text.strip()
+
+# ── Parse Gemini response and save pages to GCS ─────────────────────────
+async def save_chunk_pages(doc_name: str, raw_text: str, page_nums: list[int]):
+    parts = re.split(r"---\s*PAGE\s*\d+\s*---", raw_text)
+    pages = [p.strip() for p in parts if p.strip()]
+
+    if len(pages) != len(page_nums):
+        print(f"  [WARN] {doc_name}: chunk expected {len(page_nums)} pages, got {len(pages)} — aligning best-effort")
+        # Pad or trim to match
+        while len(pages) < len(page_nums):
+            pages.append("[MISSING]")
+        pages = pages[:len(page_nums)]
+
+    async def _upload_page(pn: int, text: str):
+        blob_name = f"{OUTPUT_FOLDER}/{doc_name}/{doc_name}_{pn:04d}.txt"
+        blob = bucket.blob(blob_name)
+        await asyncio.to_thread(blob.upload_from_string, text, content_type="text/plain")
+        preview = text[:80].replace("\n", " ")
+        print(f"  [page {pn:04d}] {doc_name} → {preview}{'...' if len(text) > 80 else ''}")
+
+    await asyncio.gather(*[_upload_page(pn, text) for pn, text in zip(page_nums, pages)])
+
+# ── Process a single chunk ───────────────────────────────────────────────
+async def process_chunk(
+    pdf_path: Path,
     doc_name: str,
-    page_num: int,
-    semaphore: asyncio.Semaphore,
+    page_nums: list[int],
+    chunk_sem: asyncio.Semaphore,
 ):
-    target = f"{OUTPUT_FOLDER}{doc_name}/{doc_name}_{page_num:04d}.txt"
-    blob   = bucket.blob(target)
+    label = f"{doc_name} p{page_nums[0]}-{page_nums[-1]}"
 
-    # Skip already-processed pages — safe to re-run mid-batch
-    if await asyncio.to_thread(blob.exists):
-        print(f"[skip] {doc_name} p.{page_num:04d}")
-        return
-
-    async with semaphore:
+    async with chunk_sem:
+        file_obj = None
         try:
-            text = await _call_gemini(img_bytes)
-            await asyncio.to_thread(blob.upload_from_string, text)
-            print(f"[ok]   {doc_name} p.{page_num:04d}")
+            chunk_bytes = await render_chunk_to_pdf(pdf_path, page_nums)
+            file_obj = await upload_chunk(chunk_bytes, label)
+
+            raw_text = await call_gemini_with_retry(file_obj, page_nums[0], page_nums[-1])
+            await save_chunk_pages(doc_name, raw_text, page_nums)
+
+            print(f"  ✓ [{label}] done")
+
         except Exception as e:
-            # Write error marker so we can identify failed pages without crashing
-            err = f"[OCR ERROR page {page_num}: {e}]"
-            await asyncio.to_thread(blob.upload_from_string, err)
-            print(f"[err]  {doc_name} p.{page_num:04d} → {e}")
+            print(f"  [ERROR] [{label}] → {e}")
+            # Save error markers so we know which pages failed
+            tasks = [
+                asyncio.to_thread(
+                    bucket.blob(f"{OUTPUT_FOLDER}/{doc_name}/{doc_name}_{pn:04d}.txt").upload_from_string,
+                    f"[OCR ERROR page {pn}: {e}]",
+                    content_type="text/plain",
+                )
+                for pn in page_nums
+            ]
+            await asyncio.gather(*tasks)
 
+        finally:
+            if file_obj:
+                await delete_gemini_file(file_obj)
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
-async def run_pipeline():
-    """
-    Iterates all PDFs in INPUT_FOLDER, processes every page concurrently.
-    Pages are rendered to memory — no local disk writes.
-    At CONCURRENCY=20 and ~3s/page: 100 pages ≈ 15-20s per document.
-    """
-    blobs     = list(storage_client.list_blobs(BUCKET_NAME, prefix=INPUT_FOLDER))
-    pdf_blobs = [b for b in blobs if b.name.lower().endswith(".pdf")]
+# ── Completion Tracking ───────────────────────────────────────────────────
+def _marker_path(doc_name: str) -> str:
+    return f"{OUTPUT_FOLDER}/{doc_name}/_complete.txt"
 
-    if not pdf_blobs:
-        print(f"No PDFs found in gs://{BUCKET_NAME}/{INPUT_FOLDER}")
+async def is_complete(doc_name: str) -> bool:
+    blob = bucket.blob(_marker_path(doc_name))
+    return await asyncio.to_thread(blob.exists)
+
+async def mark_complete(doc_name: str, n_pages: int):
+    blob = bucket.blob(_marker_path(doc_name))
+    await asyncio.to_thread(
+        blob.upload_from_string,
+        f"{doc_name} — {n_pages} pages complete",
+        content_type="text/plain",
+    )
+
+async def get_existing_pages(doc_name: str) -> set[int]:
+    prefix = f"{OUTPUT_FOLDER}/{doc_name}/{doc_name}_"
+    blobs = await asyncio.to_thread(
+        lambda: list(storage_client.list_blobs(BUCKET_NAME, prefix=prefix))
+    )
+    existing = set()
+    for b in blobs:
+        stem = Path(b.name).stem
+        try:
+            existing.add(int(stem.split("_")[-1]))
+        except ValueError:
+            continue
+    return existing
+
+# ── Single Document ──────────────────────────────────────────────────────
+async def process_document(pdf_path: Path, chunk_sem: asyncio.Semaphore):
+    doc_name = pdf_path.stem
+    t0 = time.time()
+
+    print(f"\n{'─'*50}")
+    print(f"Processing: {doc_name}")
+
+    if await is_complete(doc_name):
+        print("  [skip] already complete")
         return
 
-    print(f"Found {len(pdf_blobs)} PDF(s) to process\n")
-    semaphore = asyncio.Semaphore(CONCURRENCY)
+    doc = fitz.open(str(pdf_path))
+    n_pages = len(doc)
+    doc.close()
 
-    for blob in pdf_blobs:
-        doc_name = Path(blob.name).stem
-        print(f"{'─'*50}\nProcessing: {doc_name}")
+    existing = await get_existing_pages(doc_name)
+    pending = [pn for pn in range(1, n_pages + 1) if pn not in existing]
 
-        # Stream PDF from GCS into memory — no temp files
-        pdf_bytes = await asyncio.to_thread(blob.download_as_bytes)
-        doc       = fitz.open(stream=pdf_bytes, filetype="pdf")
-        n_pages   = len(doc)
-        print(f"  {n_pages} pages — launching {min(n_pages, CONCURRENCY)} concurrent workers")
+    if not pending:
+        await mark_complete(doc_name, n_pages)
+        print("  [skip] all pages exist, marking complete")
+        return
 
-        # Render all pages to PNG bytes up front, then close the doc
-        pages = [(i + 1, doc[i].get_pixmap(dpi=DPI).tobytes("png")) for i in range(n_pages)]
-        doc.close()
+    print(f"  {n_pages} total | {len(existing)} done | {len(pending)} pending")
 
-        # Fire all page tasks concurrently, semaphore limits active calls
-        tasks = [process_page(img, doc_name, pn, semaphore) for pn, img in pages]
-        await asyncio.gather(*tasks)
+    # Split pending pages into chunks, preserving order
+    chunks = [pending[i:i + CHUNK_SIZE] for i in range(0, len(pending), CHUNK_SIZE)]
+    print(f"  {len(chunks)} chunk(s) of up to {CHUNK_SIZE} pages")
 
-        print(f"  ✓ {doc_name} complete\n")
+    # Fire all chunks concurrently — each waits on chunk_sem individually
+    await asyncio.gather(*[
+        process_chunk(pdf_path, doc_name, chunk, chunk_sem)
+        for chunk in chunks
+    ])
 
-    print("All documents processed.")
+    await mark_complete(doc_name, n_pages)
+    elapsed = time.time() - t0
+    print(f"  ✓ {doc_name} finished in {elapsed:.1f}s ({len(pending)/elapsed:.1f} p/s)")
 
+# ── Pipeline Runner ──────────────────────────────────────────────────────
+async def run_pipeline(input_dir: str, doc_workers: int):
+    pdf_paths = sorted(Path(input_dir).glob("**/*.pdf"))
 
+    if not pdf_paths:
+        print(f"No PDFs found in {input_dir}")
+        return
+
+    print(f"Found {len(pdf_paths)} PDF(s)")
+    print(f"DOC_CONCURRENCY={doc_workers}, CHUNK_CONCURRENCY={CHUNK_CONCURRENCY}, CHUNK_SIZE={CHUNK_SIZE}")
+
+    chunk_sem = asyncio.Semaphore(CHUNK_CONCURRENCY)
+    doc_sem   = asyncio.Semaphore(doc_workers)
+
+    async def bounded(path):
+        async with doc_sem:
+            await process_document(path, chunk_sem)
+
+    t0 = time.time()
+    await asyncio.gather(*[bounded(p) for p in pdf_paths])
+    elapsed = time.time() - t0
+
+    print(f"\n{'═'*50}")
+    print(f"All done in {elapsed:.1f}s")
+    print(f"Results at: gs://{BUCKET_NAME}/{OUTPUT_FOLDER}/")
+
+# ── Entry ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    asyncio.run(run_pipeline())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default=LOCAL_INPUT_DIR)
+    parser.add_argument("--workers", type=int, default=DOC_CONCURRENCY)
+    args = parser.parse_args()
+
+    asyncio.run(run_pipeline(args.input, args.workers))

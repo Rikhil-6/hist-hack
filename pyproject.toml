@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dh-segment",
+    "dotenv>=0.9.9",
     "easyocr",
+    "google-cloud-storage>=3.9.0",
     "google-genai>=1.65.0",
     "matplotlib>=3.10.8",
     "paddleocr==3.3.0",
