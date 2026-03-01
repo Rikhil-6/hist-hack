@@ -5,6 +5,7 @@ const BACKEND     = "http://localhost:8000";
 const MAX_COMPARE = 3;
 
 function renderOCRText(text) {
+  if (!text) return "";
   return text.split("\n").map((line, i) => (
     <span key={i} style={/^\[(MARGIN|HEADER|FOOTER|ILLEGIBLE)/.test(line) ? { color: "var(--amber-dim)", fontStyle: "italic" } : {}}>
       {line}{"\n"}
@@ -19,7 +20,6 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
   const listRef        = useRef(null);
   const selectedInitRef = useRef(false);
 
-  // Auto-select first loaded page once
   useEffect(() => {
     if (!selectedInitRef.current && pages.length > 0) {
       setSelected([pages[0].page]);
@@ -55,11 +55,7 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
 
   return (
     <div style={{ display: "flex", height: 600, borderTop: "1px solid var(--rule)" }}>
-
-      {/* ── Sidebar ── */}
       <div style={{ width: 140, minWidth: 140, borderRight: "1px solid var(--rule)", display: "flex", flexDirection: "column", background: "var(--parchment-dark)" }}>
-
-        {/* Search + jump */}
         <div style={{ padding: "10px 10px 8px", borderBottom: "1px solid var(--rule)", display: "flex", flexDirection: "column", gap: 6 }}>
           <input
             type="text"
@@ -82,13 +78,11 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
           </form>
         </div>
 
-        {/* Stats */}
         <div style={{ padding: "5px 10px", borderBottom: "1px solid var(--rule)", fontFamily: "'JetBrains Mono',monospace", fontSize: "0.58rem", color: "var(--faded)", display: "flex", justifyContent: "space-between" }}>
           <span>{loadedSet.size}/{allPageNums.length} loaded</span>
           <span>{selected.length}/{MAX_COMPARE} sel.</span>
         </div>
 
-        {/* Page list */}
         <div ref={listRef} style={{ overflowY: "auto", flex: 1 }}>
           {filteredNums.length === 0 ? (
             <div style={{ padding: "20px 10px", textAlign: "center", fontFamily: "'JetBrains Mono',monospace", fontSize: "0.6rem", color: "var(--faded)" }}>
@@ -121,7 +115,6 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
           )}
         </div>
 
-        {/* Clear selection */}
         {selected.length > 0 && (
           <div style={{ borderTop: "1px solid var(--rule)", padding: "8px 10px" }}>
             <button onClick={() => setSelected([])} style={{ width: "100%", fontFamily: "'JetBrains Mono',monospace", fontSize: "0.6rem", padding: 5, border: "1px solid var(--rule)", borderRadius: 2, background: "transparent", color: "var(--faded)", cursor: "pointer" }}>
@@ -131,7 +124,6 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
         )}
       </div>
 
-      {/* ── Content columns ── */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         {cols.length > 0 ? (
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols.length}, 1fr)`, height: "100%", overflow: "hidden" }}>
@@ -168,14 +160,13 @@ function CompareViewer({ pages, allPageNums, loadedSet }) {
           </div>
         )}
       </div>
-
-      <style>{`@keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }`}</style>
     </div>
   );
 }
 
 export default function OCRView({ ocrFile, setOcrFile, ocrPages, setOcrPages, ocrProgress, setOcrProgress, ocrDone, setOcrDone, ocrJobId, setOcrJobId }) {
   const [dragging, setDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false); // <--- NEW STATE
   const [error,    setError]    = useState(null);
   const fileRef = useRef();
 
@@ -188,6 +179,8 @@ export default function OCRView({ ocrFile, setOcrFile, ocrPages, setOcrPages, oc
 
   const handleRun = async () => {
     if (!ocrFile) return;
+    
+    setIsUploading(true); // <--- START SPINNER IMMEDIATELY
     setOcrPages([]); setOcrProgress({ done: 0, total: 0 }); setOcrDone(false); setError(null); setOcrJobId(null);
 
     const form = new FormData();
@@ -216,13 +209,15 @@ export default function OCRView({ ocrFile, setOcrFile, ocrPages, setOcrPages, oc
           const raw = line.slice(6).trim();
           if (!raw) continue;
           const event = JSON.parse(raw);
-          if (event.status === "done") { setOcrDone(true); return; }
+          if (event.status === "done") { setOcrDone(true); break; }
           setOcrPages((prev) => prev.find((p) => p.page === event.page) ? prev : [...prev, event].sort((a, b) => a.page - b.page));
           setOcrProgress({ done: event.page, total: event.total });
         }
       }
     } catch (e) {
       setError(`${e.message} — is the backend running at ${BACKEND}?`);
+    } finally {
+      setIsUploading(false); // <--- STOP SPINNER REGARDLESS OF SUCCESS/FAILURE
     }
   };
 
@@ -231,7 +226,8 @@ export default function OCRView({ ocrFile, setOcrFile, ocrPages, setOcrPages, oc
     setOcrFile(null); setOcrPages([]); setOcrProgress({ done: 0, total: 0 }); setOcrDone(false); setError(null); setOcrJobId(null);
   };
 
-  const running     = ocrPages.length > 0 && !ocrDone && ocrProgress.done < ocrProgress.total;
+  // UPDATED LOGIC: show spinner if uploading OR if we're still processing pages
+  const running     = isUploading || (ocrPages.length > 0 && !ocrDone);
   const loadedSet   = new Set(ocrPages.map((p) => p.page));
   const allPageNums = ocrProgress.total > 0 ? Array.from({ length: ocrProgress.total }, (_, i) => i + 1) : [];
 
@@ -309,6 +305,26 @@ export default function OCRView({ ocrFile, setOcrFile, ocrPages, setOcrPages, oc
           <CompareViewer pages={ocrPages} allPageNums={allPageNums} loadedSet={loadedSet} />
         </div>
       )}
+
+      {/* CSS DEFINITIONS FOR SPINNER AND PULSE */}
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:0.3} 50%{opacity:1} }
+        
+        .spinner {
+          display: inline-block;
+          width: 14px;
+          height: 14px;
+          border: 2px solid rgba(255, 255, 255, 0.3);
+          border-radius: 50%;
+          border-top-color: #fff;
+          animation: spin 0.8s linear infinite;
+          vertical-align: middle;
+        }
+
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
