@@ -6,7 +6,7 @@ echo ---------------------------------------
 
 :: 1. Launch Backend in a new window
 echo Launching Backend (uv + uvicorn)...
-start "Backend (Port 8000)" cmd /k "uv run uvicorn app-backend.main:app --reload --port 8000"
+start "Backend (Port 8000)" cmd /k "uv run uvicorn app-backend.main:app --host 0.0.0.0 --reload --port 8000"
 
 :: 2. Launch Frontend in a new window
 echo Launching Frontend (npm + vite)...
