@@ -2,3 +2,6 @@
 *.png
 *.jpeg
 *.jpg
+.env
+/.venv12
+/app/node_modules
