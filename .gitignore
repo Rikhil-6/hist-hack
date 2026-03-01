@@ -2,7 +2,12 @@
 *.png
 *.jpeg
 *.jpg
+
 .env
 /.venv12
 /app/node_modules
 application_default_credentials.json
+
+/pdfs
+
+
