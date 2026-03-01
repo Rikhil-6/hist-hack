@@ -1,7 +1,7 @@
 @echo off
 title Hist-Hack Orchestrator
 echo ---------------------------------------
-echo 🔥 STARTING HIST-HACK LOCAL SERVICES 🔥
+echo STARTING HIST-HACK LOCAL SERVICES
 echo ---------------------------------------
 
 :: 1. Launch Backend in a new window
