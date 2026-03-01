@@ -150,15 +150,25 @@ async def _call_gemini(file_obj: types.File, start_page: int, end_page: int) -> 
 
 # ── Parse Gemini response into per-page texts ─────────────────────────────
 def _parse_pages(raw_text: str, page_nums: list[int]) -> dict[int, str]:
-    parts = re.split(r"---\s*PAGE\s*\d+\s*---", raw_text)
-    pages = [p.strip() for p in parts if p.strip()]
-
-    # Align to expected page count
-    while len(pages) < len(page_nums):
-        pages.append("[MISSING]")
-    pages = pages[:len(page_nums)]
-
-    return dict(zip(page_nums, pages))
+    # Find all page numbers and their positions
+    pattern = r"---\s*PAGE\s*(\d+)\s*---"
+    matches = list(re.finditer(pattern, raw_text))
+    
+    result = {}
+    
+    for i, match in enumerate(matches):
+        page_num = int(match.group(1))  # use the ACTUAL page number
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
+        text = raw_text[start:end].strip()
+        result[page_num] = text if text else "[BLANK PAGE]"
+    
+    # Fill in any pages Gemini skipped entirely
+    for pn in page_nums:
+        if pn not in result:
+            result[pn] = "[MISSING]"
+    
+    return result
 
 # ── Process one chunk, return dict of {page_num: text} ───────────────────
 async def _process_chunk(
