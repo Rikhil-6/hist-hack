@@ -33,14 +33,26 @@ client         = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 storage_client = storage.Client(project=PROJECT_ID)
 bucket         = storage_client.bucket(BUCKET_NAME)
 
-OCR_PROMPT = """Transcribe ALL text from this historical colonial document as it appears.
-Preserve original spelling, capitalisation, punctuation, and paragraph breaks.
-Interpolate reasonably with context to ensure the result is readable; but also ensure high fidelity with the observation.
-Prefix marginalia with [MARGIN: ...], headers/stamps with [HEADER: ...], illegible regions with [ILLEGIBLE].
-Blank page → output [BLANK PAGE].
-Separate each page's transcription with: --- PAGE N ---
-  where N is the absolute page number passed to you.
-Output the raw transcription ONLY. No commentary."""
+# ── Prompt ───────────────────────────────────────────────────────────────
+def _build_prompt(page_nums: list[int]) -> str:
+    return f"""You are transcribing a historical colonial document. Follow these instructions exactly.
+
+TRANSCRIPTION QUALITY:
+- Transcribe ALL text exactly as it appears — preserve original spelling, capitalisation, and punctuation
+- Preserve paragraph breaks and layout structure faithfully
+- Interpolate damaged or unclear text reasonably using context, but prioritise fidelity
+- Prefix marginalia with [MARGIN: ...]
+- Prefix headers, stamps, and official markings with [HEADER: ...]
+- Mark illegible regions with [ILLEGIBLE]
+- Blank pages → output only [BLANK PAGE]
+
+PAGE SEPARATION:
+- This chunk contains exactly {len(page_nums)} pages
+- Before EVERY page (including the first), output the separator on its own line: --- PAGE BREAK ---
+- There must be exactly {len(page_nums)} separators — one per page, no more, no less
+- Do NOT skip pages even if blank — output [BLANK PAGE] after the separator
+
+Output raw transcription ONLY. No commentary, no preamble, no explanation."""
 
 # ── Upload page text to GCS ───────────────────────────────────────────────
 async def _save_to_gcs(doc_name: str, pn: int, text: str):
@@ -73,7 +85,7 @@ async def _get_page_count(pdf_path: str) -> int:
         return n
     return await asyncio.to_thread(_count)
 
-# ── Render single page to PNG bytes (for image_b64 thumbnail only) ───────
+# ── Render single page to PNG bytes ──────────────────────────────────────
 async def _render_page_png(pdf_path: str, page_num: int) -> bytes:
     def _render():
         doc = fitz.open(pdf_path)
@@ -83,7 +95,7 @@ async def _render_page_png(pdf_path: str, page_num: int) -> bytes:
         return data
     return await asyncio.to_thread(_render)
 
-# ── Extract chunk as a sub-PDF bytes (for Gemini upload) ─────────────────
+# ── Extract chunk as a sub-PDF bytes ─────────────────────────────────────
 async def _extract_chunk_pdf(pdf_path: str, page_nums: list[int]) -> bytes:
     def _extract():
         src = fitz.open(pdf_path)
@@ -116,7 +128,7 @@ async def _upload_chunk(chunk_bytes: bytes) -> types.File:
         if status.state == types.FileState.ACTIVE:
             break
         if status.state == types.FileState.FAILED:
-            raise RuntimeError(f"Gemini file upload failed")
+            raise RuntimeError("Gemini file upload failed")
         await asyncio.sleep(1)
 
     return file_obj
@@ -129,9 +141,8 @@ async def _delete_gemini_file(file_obj: types.File):
         pass
 
 # ── Call Gemini with retry ────────────────────────────────────────────────
-async def _call_gemini(file_obj: types.File, start_page: int, end_page: int) -> str:
-    prompt = OCR_PROMPT + f"\nThis chunk contains pages {start_page} to {end_page}. Number pages accordingly."
-
+async def _call_gemini(file_obj: types.File, page_nums: list[int]) -> str:
+    prompt = _build_prompt(page_nums)    
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(30),
         wait=wait_exponential(multiplier=2, min=5, max=120),
@@ -150,27 +161,24 @@ async def _call_gemini(file_obj: types.File, start_page: int, end_page: int) -> 
 
 # ── Parse Gemini response into per-page texts ─────────────────────────────
 def _parse_pages(raw_text: str, page_nums: list[int]) -> dict[int, str]:
-    # Find all page numbers and their positions
-    pattern = r"---\s*PAGE\s*(\d+)\s*---"
-    matches = list(re.finditer(pattern, raw_text))
-    
+    # Split on --- PAGE BREAK --- separators, purely positional
+    parts = re.split(r"---\s*PAGE BREAK\s*---", raw_text)
+
+    # Drop leading empty string if response starts with a separator
+    if parts and not parts[0].strip():
+        parts = parts[1:]
+
     result = {}
-    
-    for i, match in enumerate(matches):
-        page_num = int(match.group(1))  # use the ACTUAL page number
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
-        text = raw_text[start:end].strip()
-        result[page_num] = text if text else "[BLANK PAGE]"
-    
-    # Fill in any pages Gemini skipped entirely
-    for pn in page_nums:
-        if pn not in result:
+    for i, pn in enumerate(page_nums):
+        if i < len(parts):
+            text = parts[i].strip()
+            result[pn] = text if text else "[BLANK PAGE]"
+        else:
             result[pn] = "[MISSING]"
-    
+
     return result
 
-# ── Process one chunk, return dict of {page_num: text} ───────────────────
+# ── Process one chunk ─────────────────────────────────────────────────────
 async def _process_chunk(
     pdf_path: str,
     page_nums: list[int],
@@ -181,7 +189,7 @@ async def _process_chunk(
         try:
             chunk_bytes = await _extract_chunk_pdf(pdf_path, page_nums)
             file_obj    = await _upload_chunk(chunk_bytes)
-            raw_text    = await _call_gemini(file_obj, page_nums[0], page_nums[-1])
+            raw_text    = await _call_gemini(file_obj, page_nums)
             return _parse_pages(raw_text, page_nums)
         except Exception as e:
             return {pn: f"[OCR ERROR page {pn}: {e}]" for pn in page_nums}
@@ -203,49 +211,34 @@ async def run_ocr_pipeline(pdf_path: str, job_id: str):
     chunks        = [all_page_nums[i:i + CHUNK_SIZE] for i in range(0, n_pages, CHUNK_SIZE)]
     sem           = asyncio.Semaphore(CHUNK_CONCURRENCY)
 
-    # Fire all chunks concurrently
-    chunk_tasks = {
-        pn: None
-        for pn in all_page_nums
-    }
-
-    # result_map will be populated as chunks complete
     result_map: dict[int, str] = {}
     next_to_yield = 1
-
-    # Queue to receive results as chunks finish
     queue: asyncio.Queue = asyncio.Queue()
 
     async def run_chunk(page_nums):
         results = await _process_chunk(pdf_path, page_nums, sem)
         await queue.put(results)
 
-    # Launch all chunks
     tasks = [asyncio.ensure_future(run_chunk(chunk)) for chunk in chunks]
     chunks_done = 0
 
     while chunks_done < len(chunks) or next_to_yield <= n_pages:
-        # Wait for next chunk to finish
         if chunks_done < len(chunks):
             chunk_results = await queue.get()
             result_map.update(chunk_results)
             chunks_done += 1
 
-        # Yield all pages we can in order
         while next_to_yield in result_map:
             pn   = next_to_yield
             text = result_map.pop(pn)
 
-            # Render PNG for image_b64 (lower DPI for fast streaming)
             try:
                 img_bytes = await _render_page_png(pdf_path, pn)
                 image_b64 = base64.b64encode(img_bytes).decode()
             except Exception:
                 image_b64 = ""
 
-            status = "error" if text.startswith("[OCR ERROR") else "ok"
-
-            # Save to GCS (fire-and-forget alongside the yield)
+            status = "error" if text.startswith("[OCR ERROR") or text == "[MISSING]" else "ok"
             asyncio.ensure_future(_save_to_gcs(doc_name, pn, text))
 
             yield {
