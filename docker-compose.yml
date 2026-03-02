@@ -14,7 +14,8 @@ services:
       # Load the .env from the root automatically
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
     command: >
-      sh -c "uv sync --frozen --no-install-python && 
+      sh -c "apt-get update && apt-get install -y git &&
+              uv sync --frozen --no-install-project && 
              uv run uvicorn app-backend.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
